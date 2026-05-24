@@ -19,7 +19,8 @@ function timeToMinutes(t: string): number {
 /**
  * 判断歌手档期是否能覆盖节次
  * 逻辑：
- * - 凌晨节次（<06:00，如01:00）：歌手当天晚上在场 或 跨天工作到凌晨，均可匹配
+ * - 凌晨节次（start<06:00，如01:00）：歌手当晚在场 或 跨天工作到凌晨
+ * - 跨天节次（end<start，如23:30-00:00）：歌手必须跨天工作到凌晨
  * - 正常节次：歌手来得不晚于节次开始，且离场不早于节次结束（+30分钟缓冲）
  */
 function canCoverSession(
@@ -33,7 +34,6 @@ function canCoverSession(
     const tonight = availStart >= '18:00' && availEnd >= '18:00'; // 当晚在场
     const overnight = availStart >= '18:00' && availEnd < '06:00'; // 跨天到凌晨
     if (tonight || overnight) {
-      // 跨天还需检查是否覆盖节次结束
       if (overnight) {
         const availEndMin = timeToMinutes(availEnd);
         const sessionEndMin = timeToMinutes(sessionEnd);
@@ -42,6 +42,14 @@ function canCoverSession(
       return true;
     }
     return false;
+  }
+
+  // 跨天节次（如 23:30-00:00）：歌手必须跨天工作（availEnd < 06:00）
+  if (sessionEnd < sessionStart) {
+    if (availEnd >= '06:00') return false; // 不跨天的歌手无法覆盖跨天节次
+    const availEndMin = timeToMinutes(availEnd);
+    const sessionEndMin = timeToMinutes(sessionEnd);
+    return availEndMin + 30 >= sessionEndMin;
   }
 
   // 正常节次：歌手来得不比节次晚
