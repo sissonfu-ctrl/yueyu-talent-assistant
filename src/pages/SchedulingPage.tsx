@@ -281,8 +281,14 @@ export default function SchedulingPage() {
   };
 
   const addAssignment = async (artistId: string) => {
-    if (!schedule) return;
+    if (!schedule || !activeSession) return;
     const [date, sessionId] = cellKey.split('_');
+    const needed = activeSession.singers_per_session || 1;
+    const current = cellAssignments.filter((a) => a.artist_id).length;
+    if (current >= needed) {
+      toast.error('本节已满，请先删除一名歌手再添加');
+      return;
+    }
     const payload: Partial<ScheduleAssignment> = {
       schedule_id: schedule.id,
       date,
@@ -434,13 +440,12 @@ export default function SchedulingPage() {
       .map((a) => a.artist_id!)
   );
 
-  // Filter out already-assigned and today-busy from priority groups
+  // 只过滤同天其他节次已排的歌手；本节已分配歌手仍然显示（标"已选"），方便替换
   const filteredPriorityGroups = priorityGroups.map((group) =>
-    group.filter((a) => !assignedIds.has(a.id) && !todayAssignedIds.has(a.id))
+    group.filter((a) => !todayAssignedIds.has(a.id))
   );
 
-  const remainingMatched = availableMatched.filter((a) => !assignedIds.has(a.id) && !todayAssignedIds.has(a.id));
-  const remainingUnmatched = availableUnmatched.filter((a) => !assignedIds.has(a.id) && !todayAssignedIds.has(a.id));
+  const otherUnmatched = availableUnmatched.filter((a) => !todayAssignedIds.has(a.id));
 
   // Artists available but already assigned today in other sessions
   const todayBusyMatched = availableMatched.filter((a) => todayAssignedIds.has(a.id));
@@ -821,7 +826,7 @@ export default function SchedulingPage() {
             </div>
 
             {/* Available artists by priority */}
-            {(filteredPriorityGroups.some((g) => g.length > 0) || remainingUnmatched.length > 0) && (
+            {(filteredPriorityGroups.some((g) => g.length > 0) || otherUnmatched.length > 0) && (
               <div className="space-y-3">
                 {filteredPriorityGroups.map((group, idx) =>
                   group.length > 0 ? (
@@ -833,40 +838,64 @@ export default function SchedulingPage() {
                         <span>{activeSession?.style_tags?.[idx]}</span>
                       </label>
                       <div className="space-y-2">
-                        {group.map((artist) => (
-                          <button
-                            key={artist.id}
-                            onClick={() => addAssignment(artist.id)}
-                            className="w-full text-left p-3 rounded-lg border border-border bg-card hover:bg-muted transition-colors flex items-center gap-3 min-h-[48px]"
-                          >
-                            <Plus className="h-4 w-4 text-primary shrink-0" />
-                            <div className="min-w-0 flex-1">
-                              <div className="font-medium text-sm truncate">{artist.name}</div>
-                              <div className="text-xs text-primary truncate">{artist.style_tags.join(' / ')}</div>
-                            </div>
-                          </button>
-                        ))}
+                        {group.map((artist) => {
+                          const isAssigned = assignedIds.has(artist.id);
+                          return (
+                            <button
+                              key={artist.id}
+                              onClick={() => { if (!isAssigned) addAssignment(artist.id); }}
+                              disabled={isAssigned}
+                              className={`w-full text-left p-3 rounded-lg border flex items-center gap-3 min-h-[48px] ${
+                                isAssigned
+                                  ? 'border-border bg-muted/30 opacity-50 cursor-default'
+                                  : 'border-border bg-card hover:bg-muted transition-colors'
+                              }`}
+                            >
+                              {isAssigned ? (
+                                <span className="text-xs text-muted-foreground shrink-0 w-4 text-center">已选</span>
+                              ) : (
+                                <Plus className="h-4 w-4 text-primary shrink-0" />
+                              )}
+                              <div className="min-w-0 flex-1">
+                                <div className="font-medium text-sm truncate">{artist.name}</div>
+                                <div className={`text-xs truncate ${isAssigned ? 'text-muted-foreground' : 'text-primary'}`}>{artist.style_tags.join(' / ')}</div>
+                              </div>
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
                   ) : null
                 )}
-                {remainingUnmatched.length > 0 && (
+                {otherUnmatched.length > 0 && (
                   <div className="space-y-2">
                     <label className="text-sm font-medium">其他可选</label>
                     <div className="space-y-2">
-                      {remainingUnmatched.map((artist) => (
-                        <button
-                          key={artist.id}
-                          onClick={() => addAssignment(artist.id)}
-                          className="w-full text-left p-3 rounded-lg border border-border bg-card hover:bg-muted transition-colors flex items-center gap-3 min-h-[48px] opacity-70"
-                        >
-                          <Plus className="h-4 w-4 text-muted-foreground shrink-0" />
-                          <div className="min-w-0 flex-1">
-                            <div className="font-medium text-sm truncate">{artist.name}</div>
-                            <div className="text-xs text-muted-foreground truncate">{artist.style_tags.join(' / ')}</div>
-                          </div>
-                        </button>
-                      ))}
+                      {otherUnmatched.map((artist) => {
+                        const isAssigned = assignedIds.has(artist.id);
+                        return (
+                          <button
+                            key={artist.id}
+                            onClick={() => { if (!isAssigned) addAssignment(artist.id); }}
+                            disabled={isAssigned}
+                            className={`w-full text-left p-3 rounded-lg border flex items-center gap-3 min-h-[48px] ${
+                              isAssigned
+                                ? 'border-border bg-muted/30 opacity-50 cursor-default'
+                                : 'border-border bg-card hover:bg-muted transition-colors opacity-70'
+                            }`}
+                          >
+                            {isAssigned ? (
+                              <span className="text-xs text-muted-foreground shrink-0 w-4 text-center">已选</span>
+                            ) : (
+                              <Plus className="h-4 w-4 text-muted-foreground shrink-0" />
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <div className="font-medium text-sm truncate">{artist.name}</div>
+                              <div className={`text-xs truncate ${isAssigned ? 'text-muted-foreground' : 'text-muted-foreground'}`}>{artist.style_tags.join(' / ')}</div>
+                            </div>
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -891,7 +920,7 @@ export default function SchedulingPage() {
                 </div>
               </div>
             )}
-            {filteredPriorityGroups.every((g) => g.length === 0) && remainingUnmatched.length === 0 && todayBusyMatched.length === 0 && todayBusyUnmatched.length === 0 && (
+            {filteredPriorityGroups.every((g) => g.length === 0) && otherUnmatched.length === 0 && todayBusyMatched.length === 0 && todayBusyUnmatched.length === 0 && (
               <p className="text-sm text-muted-foreground py-2">无可选歌手</p>
             )}
 
