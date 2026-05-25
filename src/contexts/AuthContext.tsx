@@ -1,138 +1,63 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
-// @ts-ignore
-import { supabase } from '@/db/supabase';
-import type { User } from '@supabase/supabase-js';
-// @ts-ignore
-import type { Profile } from '@/types/types';
-import { toast } from 'sonner';
+import { type AuthUser, loginUser, registerUser, verifyToken } from '@/db/auth';
 
-export async function getProfile(userId: string): Promise<Profile | null> {
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('*')
-    .eq('id', userId)
-    .maybeSingle();
-
-  if (error) {
-    console.error('获取用户信息失败:', error);
-    return null;
-  }
-  return data;
-}
 interface AuthContextType {
-  user: User | null;
-  profile: Profile | null;
+  user: AuthUser | null;
   loading: boolean;
-  signInWithUsername: (username: string, password: string) => Promise<{ error: Error | null }>;
-  signUpWithUsername: (username: string, password: string) => Promise<{ error: Error | null }>;
-  signOut: () => Promise<void>;
-  refreshProfile: () => Promise<void>;
+  signIn: (email: string, password: string) => Promise<{ error: Error | null }>;
+  signUp: (email: string, password: string) => Promise<{ error: Error | null }>;
+  signOut: () => void;
 }
 
 export const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [profile, setProfile] = useState<Profile | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const refreshProfile = async () => {
-    if (!user) {
-      setProfile(null);
-      return;
-    }
-
-    const profileData = await getProfile(user.id);
-    setProfile(profileData);
-  };
-
   useEffect(() => {
-    // Validate session on startup: getUser validates the token with the server
-    supabase
-      .auth
-      .getUser()
-      .then(({ data: { user: u }, error }) => {
-        if (u) {
-          setUser(u);
-          getProfile(u.id).then(setProfile);
-          setLoading(false);
-          return;
+    const init = async () => {
+      const token = localStorage.getItem('singer-tool-token');
+      if (token) {
+        const verified = await verifyToken(token);
+        if (verified) {
+          setUser(verified);
+        } else {
+          localStorage.removeItem('singer-tool-token');
         }
-        // If getUser failed, try refreshSession
-        if (error) {
-          return supabase.auth.refreshSession().then(({ data: { session } }) => {
-            if (session?.user) {
-              setUser(session.user);
-              getProfile(session.user.id).then(setProfile);
-            } else {
-              setUser(null);
-              setProfile(null);
-            }
-            setLoading(false);
-          });
-        }
-        setUser(null);
-        setProfile(null);
-        setLoading(false);
-      })
-      .catch(() => {
-        setUser(null);
-        setProfile(null);
-        setLoading(false);
-      });
-
-    // @ts-ignore
-    // In this function, do NOT use any await calls. Use `.then()` instead to avoid deadlocks.
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
-      if (session?.user) {
-        getProfile(session.user.id).then(setProfile);
-      } else {
-        setProfile(null);
       }
-    });
-
-    return () => subscription.unsubscribe();
+      setLoading(false);
+    };
+    init();
   }, []);
 
-  const signInWithUsername = async (username: string, password: string) => {
+  const signIn = async (email: string, password: string) => {
     try {
-      const email = `${username}@miaoda.com`;
-      const { error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
-
-      if (error) throw error;
+      const result = await loginUser(email, password);
+      localStorage.setItem('singer-tool-token', result.token);
+      setUser(result.user);
       return { error: null };
     } catch (error) {
       return { error: error as Error };
     }
   };
 
-  const signUpWithUsername = async (username: string, password: string) => {
+  const signUp = async (email: string, password: string) => {
     try {
-      const email = `${username}@miaoda.com`;
-      const { error } = await supabase.auth.signUp({
-        email,
-        password,
-      });
-
-      if (error) throw error;
+      await registerUser(email, password);
       return { error: null };
     } catch (error) {
       return { error: error as Error };
     }
   };
 
-  const signOut = async () => {
-    await supabase.auth.signOut();
+  const signOut = () => {
+    localStorage.removeItem('singer-tool-token');
     setUser(null);
-    setProfile(null);
   };
 
   return (
-    <AuthContext.Provider value={{ user, profile, loading, signInWithUsername, signUpWithUsername, signOut, refreshProfile }}>
+    <AuthContext.Provider value={{ user, loading, signIn, signUp, signOut }}>
       {children}
     </AuthContext.Provider>
   );
@@ -141,16 +66,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 export function useAuth() {
   const context = useContext(AuthContext);
   if (context === undefined) {
-    // During React Fast Refresh, AuthProvider may be temporarily unmounted.
-    // Return a safe fallback instead of crashing.
     return {
       user: null,
-      profile: null,
       loading: true,
-      signInWithUsername: async () => ({ error: new Error('AuthProvider not mounted') }),
-      signUpWithUsername: async () => ({ error: new Error('AuthProvider not mounted') }),
-      signOut: async () => {},
-      refreshProfile: async () => {},
+      signIn: async () => ({ error: new Error('AuthProvider not mounted') }),
+      signUp: async () => ({ error: new Error('AuthProvider not mounted') }),
+      signOut: () => {},
     } as AuthContextType;
   }
   return context;

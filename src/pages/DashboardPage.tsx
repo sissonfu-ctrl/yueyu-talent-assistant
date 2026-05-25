@@ -3,7 +3,8 @@ import { Link } from 'react-router-dom';
 import { getBars, getArtists, getSchedules } from '@/services/database';
 import type { Bar, Artist, Schedule } from '@/types/types';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Building2, Mic2, CalendarDays, ClipboardList, Users, History } from 'lucide-react';
+import { Building2, Mic2, CalendarDays, ClipboardList, Users, History, AlertTriangle } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 
 export default function DashboardPage() {
   const [bars, setBars] = useState<Bar[]>([]);
@@ -34,6 +35,7 @@ export default function DashboardPage() {
   const singers = artists.filter((a) => a.type === 'singer');
   const musicians = artists.filter((a) => a.type === 'musician');
   const currentSchedules = schedules.filter((s) => s.is_current);
+  const unScheduledBars = bars.filter((b) => !currentSchedules.some((s) => s.bar_id === b.id));
 
   const quickLinks = [
     { name: '酒吧管理', path: '/bars', icon: Building2, desc: `${bars.length} 家酒吧` },
@@ -89,6 +91,26 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
       </div>
+
+      {unScheduledBars.length > 0 && (
+        <Card className="border-amber-200 bg-amber-50 dark:bg-amber-950/20">
+          <CardContent className="p-4">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-2 min-w-0">
+                <AlertTriangle className="h-5 w-5 text-amber-600 shrink-0" />
+                <span className="text-sm">
+                  <span className="font-medium">{unScheduledBars.length} 个酒吧</span>
+                  <span className="text-muted-foreground"> 本周未排班：</span>
+                  <span className="truncate">{unScheduledBars.map((b) => b.name).join('、')}</span>
+                </span>
+              </div>
+              <Link to="/schedule">
+                <Button size="sm" variant="outline" className="shrink-0">去排班 →</Button>
+              </Link>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {quickLinks.map((link) => (

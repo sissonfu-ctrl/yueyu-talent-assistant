@@ -23,8 +23,8 @@ function SidebarContent({ onItemClick }: { onItemClick?: () => void }) {
   const { signOut } = useAuth();
   const navigate = useNavigate();
 
-  const handleLogout = async () => {
-    await signOut();
+  const handleLogout = () => {
+    signOut();
     navigate('/login');
   };
 

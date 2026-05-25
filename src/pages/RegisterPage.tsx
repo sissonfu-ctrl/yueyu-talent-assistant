@@ -9,18 +9,18 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { toast } from 'sonner';
 
 export default function RegisterPage() {
-  const [username, setUsername] = useState('');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [agreed, setAgreed] = useState(false);
   const [loading, setLoading] = useState(false);
-  const { signUpWithUsername } = useAuth();
+  const { signUp } = useAuth();
   const navigate = useNavigate();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!username || !password) {
-      toast.error('请填写用户名和密码');
+    if (!email || !password) {
+      toast.error('请填写邮箱和密码');
       return;
     }
     if (password !== confirmPassword) {
@@ -32,7 +32,7 @@ export default function RegisterPage() {
       return;
     }
     setLoading(true);
-    const { error } = await signUpWithUsername(username, password);
+    const { error } = await signUp(email, password);
     setLoading(false);
     if (error) {
       toast.error('注册失败：' + error.message);
@@ -52,13 +52,14 @@ export default function RegisterPage() {
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
-              <Label htmlFor="reg-username">用户名</Label>
+              <Label htmlFor="reg-email">邮箱</Label>
               <Input
-                id="reg-username"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder="请输入用户名（仅字母、数字、下划线）"
-                autoComplete="username"
+                id="reg-email"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="请输入邮箱"
+                autoComplete="email"
               />
             </div>
             <div className="space-y-2">

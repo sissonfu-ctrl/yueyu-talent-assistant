@@ -1,0 +1,29 @@
+import { r as __toESM } from "./chunk-D94lAOSK.js";
+import { t as require_react } from "./react-CT_z9WBP.js";
+import { i as useLayoutEffect2 } from "./dist-D4id0buO.js";
+
+//#region node_modules/@radix-ui/react-id/dist/index.mjs
+var import_react = /* @__PURE__ */ __toESM(require_react(), 1);
+var useReactId = import_react[" useId ".trim().toString()] || (() => void 0);
+var count = 0;
+function useId(deterministicId) {
+	const [id, setId] = import_react.useState(useReactId());
+	useLayoutEffect2(() => {
+		if (!deterministicId) setId((reactId) => reactId ?? String(count++));
+	}, [deterministicId]);
+	return deterministicId || (id ? `radix-${id}` : "");
+}
+
+//#endregion
+//#region node_modules/@radix-ui/react-use-callback-ref/dist/index.mjs
+function useCallbackRef(callback) {
+	const callbackRef = import_react.useRef(callback);
+	import_react.useEffect(() => {
+		callbackRef.current = callback;
+	});
+	return import_react.useMemo(() => (...args) => callbackRef.current?.(...args), []);
+}
+
+//#endregion
+export { useId as n, useCallbackRef as t };
+//# sourceMappingURL=dist-CnMibXNf.js.map

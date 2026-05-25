@@ -1,4 +1,4 @@
-import type { ReactNode, LazyExoticComponent } from 'react';
+import type { ReactNode } from 'react';
 import { lazy } from 'react';
 
 const LoginPage = lazy(() => import('./pages/LoginPage'));
@@ -37,5 +37,5 @@ export const routes: RouteConfig[] = [
   { name: '历史排班', path: '/history', element: <HistoryPage /> },
   { name: '登录', path: '/login', element: <LoginPage />, public: true },
   { name: '注册', path: '/register', element: <RegisterPage />, public: true },
-  { name: 'Not Found', path: '*', element: <NotFound />, public: true },
+  { name: 'Not Found', path: '*', element: <NotFound /> },
 ];

@@ -3,6 +3,8 @@ export type ScheduleCycleType = 'weekly' | 'monthly';
 export type PoolType = 'closed' | 'open';
 export type AvailabilityType = 'fixed' | 'temporary';
 export type ScheduleStatus = 'draft' | 'published';
+export type OverrideMode = 'append' | 'replace';
+export type SettlementMode = 'weekly' | 'monthly';
 
 export interface Bar {
   id: string;
@@ -14,6 +16,8 @@ export interface Bar {
   pool_type: PoolType;
   default_price_per_show: number;
   rest_days: number[]; // 0=周日,1=周一...6=周六
+  replace_weekdays: number[]; // 标记为"覆盖"模式的星期
+  settlement_mode: SettlementMode; // 结算方式：周结或月结
   created_at: string;
   user_id: string;
 }
@@ -38,6 +42,7 @@ export interface Artist {
   type: ArtistType;
   style_tags: string[];
   fixed_bar_id: string | null;
+  bar_priority: string[] | null;
   created_at: string;
   user_id: string;
 }
@@ -58,6 +63,7 @@ export interface ArtistAvailability {
 export interface ArtistBarLink {
   artist_id: string;
   bar_id: string;
+  preferred_sessions?: number[] | null;
 }
 
 export interface BarArtistPrice {

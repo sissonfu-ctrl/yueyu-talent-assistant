@@ -30,9 +30,9 @@ function canCoverSession(
   sessionEnd: string
 ): boolean {
   // 凌晨节次（< 06:00）：当晚在场 或 跨天工作到凌晨
-  if (sessionStart < '06:00') {
-    const tonight = availStart >= '18:00' && availEnd >= '18:00'; // 当晚在场
-    const overnight = availStart >= '18:00' && availEnd < '06:00'; // 跨天到凌晨
+  if (timeToMinutes(sessionStart) < 360) {
+    const tonight = timeToMinutes(availStart) >= 1080 && timeToMinutes(availEnd) >= 1080; // 1080=18:00 当晚在场
+    const overnight = timeToMinutes(availStart) >= 1080 && timeToMinutes(availEnd) < 360; // 跨天到凌晨
     if (tonight || overnight) {
       if (overnight) {
         const availEndMin = timeToMinutes(availEnd);
@@ -44,9 +44,9 @@ function canCoverSession(
     return false;
   }
 
-  // 跨天节次（如 23:30-00:00）：歌手必须跨天工作（availEnd < 06:00）
+  // 跨天节次（如 23:30-00:00）：歌手必须跨天工作（availEnd < 06:00 即凌晨）
   if (sessionEnd < sessionStart) {
-    if (availEnd >= '06:00') return false; // 不跨天的歌手无法覆盖跨天节次
+    if (timeToMinutes(availEnd) >= 360) return false; // 360 = 06:00，非凌晨的歌手无法覆盖跨天节次
     const availEndMin = timeToMinutes(availEnd);
     const sessionEndMin = timeToMinutes(sessionEnd);
     return availEndMin + 30 >= sessionEndMin;
@@ -56,8 +56,12 @@ function canCoverSession(
   if (availStart > sessionStart) return false;
 
   // 歌手必须覆盖到节次结束（+30分钟缓冲）
-  const availEndMin = timeToMinutes(availEnd);
+  let availEndMin = timeToMinutes(availEnd);
   const sessionEndMin = timeToMinutes(sessionEnd);
+  // 歌手跨午夜（如 22:30-0:00）：结束时间算到次日 +1440
+  if (timeToMinutes(availEnd) < timeToMinutes(availStart)) {
+    availEndMin += 1440;
+  }
   return availEndMin + 30 >= sessionEndMin;
 }
 
@@ -266,7 +270,8 @@ export function autoAssign(
   availabilities: ArtistAvailability[],
   sessions: BarSession[],
   dates: Date[],
-  restDays: number[] = []
+  restDays: number[] = [],
+  preferredSessionsMap?: Record<string, number[]>
 ): Record<string, string[]> {
   const result: Record<string, string[]> = {};
   const showCount: Record<string, number> = {};
@@ -282,50 +287,40 @@ export function autoAssign(
       const key = `${dateStr}_${session.id}`;
       const needed = session.singers_per_session;
 
-      // Step 1: Auto-lock fixed-slot singers, style-matched first
-      const styleTags = session.style_tags || [];
-      const fixedCandidates = artists.filter(
-        (a) =>
-          hasFixedAvailability(a.id, availabilities, dayOfWeek) &&
-          isArtistAvailable(a, availabilities, date, session)
-      );
-      // Sort: style-matched first, then by show count (balanced)
-      const sortedFixed = [...fixedCandidates].sort((a, b) => {
-        const aStyleMatch = styleTags.some((st) => a.style_tags.includes(st)) ? 1 : 0;
-        const bStyleMatch = styleTags.some((st) => b.style_tags.includes(st)) ? 1 : 0;
-        if (bStyleMatch !== aStyleMatch) return bStyleMatch - aStyleMatch;
-        return (showCount[a.id] || 0) - (showCount[b.id] || 0);
-      });
-      const locked: string[] = [];
-      for (const artist of sortedFixed) {
-        if (locked.length >= needed) break;
-        locked.push(artist.id);
-        showCount[artist.id] = (showCount[artist.id] || 0) + 1;
-      }
-
-      // Step 2: Fill remaining slots with style-matched available artists
-      const remainingNeeded = needed - locked.length;
+      // Fill slots with style-matched available artists, balanced distribution
       const styleMatched = filterStyleMatchedArtists(
-        artists.filter((a) => !locked.includes(a.id)),
+        artists,
         availabilities,
         date,
         session,
         session.style_tags || []
       );
 
-      // Sort by show count for balanced distribution
+      // Sort: 1) showCount (lowest first = fair)  2) preference match  3) random
       const sorted = [...styleMatched].sort(
-        (a, b) => (showCount[a.id] || 0) - (showCount[b.id] || 0)
+        (a, b) => {
+          const diff = (showCount[a.id] || 0) - (showCount[b.id] || 0);
+          if (diff !== 0) return diff;
+          // 偏好节次：当前节次在偏好数组中的索引，越靠前越优先
+          const aPref = preferredSessionsMap?.[a.id] || [];
+          const bPref = preferredSessionsMap?.[b.id] || [];
+          const aIdx = aPref.indexOf(session.session_number);
+          const bIdx = bPref.indexOf(session.session_number);
+          const aRank = aIdx === -1 ? Infinity : aIdx;
+          const bRank = bIdx === -1 ? Infinity : bIdx;
+          if (aRank !== bRank) return aRank - bRank;
+          return Math.random() - 0.5;
+        }
       );
 
       const picked: string[] = [];
       for (const artist of sorted) {
-        if (picked.length >= remainingNeeded) break;
+        if (picked.length >= needed) break;
         picked.push(artist.id);
         showCount[artist.id] = (showCount[artist.id] || 0) + 1;
       }
 
-      result[key] = [...locked, ...picked];
+      result[key] = picked;
     }
   }
 

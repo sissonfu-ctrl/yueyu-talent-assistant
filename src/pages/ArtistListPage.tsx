@@ -1,11 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { getArtists, getBars, getArtistBarLinks, deleteArtist, deleteArtists } from '@/services/database';
 import type { Artist, Bar } from '@/types/types';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
 import { toast } from 'sonner';
@@ -16,7 +15,7 @@ export default function ArtistListPage() {
   const [bars, setBars] = useState<Bar[]>([]);
   const [links, setLinks] = useState<Record<string, string[]>>({});
   const [loading, setLoading] = useState(true);
-  const [filterType, setFilterType] = useState<string>('all');
+  const [selectedTag, setSelectedTag] = useState('all');
   const [search, setSearch] = useState('');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
@@ -47,25 +46,70 @@ export default function ArtistListPage() {
     }
   }
 
-  const handleDelete = async (id: string) => {
-    if (!confirm('确定删除该艺人？')) return;
-    try {
-      await deleteArtist(id);
-      toast.success('删除成功');
-      loadData();
-    } catch (e: any) {
-      toast.error('删除失败：' + e.message);
+  // 动态计算标签 + 人数
+  const tagStats = useMemo(() => {
+    const counts: Record<string, number> = {};
+    let untagged = 0;
+    artists.forEach((a) => {
+      if (a.style_tags.length === 0) {
+        untagged++;
+      } else {
+        a.style_tags.forEach((tag) => {
+          counts[tag] = (counts[tag] || 0) + 1;
+        });
+      }
+    });
+    // 按人数降序排列
+    const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+    return { entries, untagged, total: artists.length };
+  }, [artists]);
+
+  // 当前可见的艺人列表（搜索 + 标签双层过滤）
+  const visibleArtistIds = useMemo(() => {
+    return new Set(
+      artists
+        .filter((a) => {
+          if (search && !a.name.includes(search) && !a.phone?.includes(search)) return false;
+          if (selectedTag === '未分类') return a.style_tags.length === 0;
+          if (selectedTag !== 'all') return a.style_tags.includes(selectedTag);
+          return true;
+        })
+        .map((a) => a.id)
+    );
+  }, [artists, search, selectedTag]);
+
+  // 「全部」模式下的分区数据
+  const sections = useMemo(() => {
+    if (selectedTag !== 'all') return null;
+    const result: { tag: string; artists: Artist[] }[] = [];
+    tagStats.entries.forEach(([tag]) => {
+      const list = artists.filter(
+        (a) => a.style_tags.includes(tag) && (!search || a.name.includes(search) || a.phone?.includes(search))
+      );
+      if (list.length > 0) result.push({ tag, artists: list });
+    });
+    // 未分类
+    const untaggedList = artists.filter(
+      (a) => a.style_tags.length === 0 && (!search || a.name.includes(search) || a.phone?.includes(search))
+    );
+    if (untaggedList.length > 0) result.push({ tag: '未分类', artists: untaggedList });
+    return result;
+  }, [artists, search, selectedTag, tagStats]);
+
+  // 单个标签模式下的扁平列表
+  const filteredFlat = useMemo(() => {
+    return artists.filter((a) => visibleArtistIds.has(a.id));
+  }, [artists, visibleArtistIds]);
+
+  const allVisibleIds = useMemo(() => {
+    if (selectedTag === 'all' && sections) {
+      return sections.flatMap((s) => s.artists.map((a) => a.id));
     }
-  };
+    return filteredFlat.map((a) => a.id);
+  }, [sections, filteredFlat, selectedTag]);
 
-  const filtered = artists.filter((a) => {
-    if (filterType !== 'all' && a.type !== filterType) return false;
-    if (search && !a.name.includes(search) && !a.phone?.includes(search)) return false;
-    return true;
-  });
-
-  const allFilteredIds = filtered.map((a) => a.id);
-  const isAllSelected = filtered.length > 0 && allFilteredIds.every((id) => selectedIds.has(id));
+  const visibleCount = allVisibleIds.length;
+  const isAllSelected = visibleCount > 0 && allVisibleIds.every((id) => selectedIds.has(id));
 
   function toggleSelect(id: string) {
     setSelectedIds((prev) => {
@@ -79,17 +123,28 @@ export default function ArtistListPage() {
     if (isAllSelected) {
       setSelectedIds((prev) => {
         const next = new Set(prev);
-        allFilteredIds.forEach((id) => next.delete(id));
+        allVisibleIds.forEach((id) => next.delete(id));
         return next;
       });
     } else {
       setSelectedIds((prev) => {
         const next = new Set(prev);
-        allFilteredIds.forEach((id) => next.add(id));
+        allVisibleIds.forEach((id) => next.add(id));
         return next;
       });
     }
   }
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('确定删除该艺人？')) return;
+    try {
+      await deleteArtist(id);
+      toast.success('删除成功');
+      loadData();
+    } catch (e: any) {
+      toast.error('删除失败：' + e.message);
+    }
+  };
 
   const handleBatchDelete = async () => {
     if (selectedIds.size === 0) return;
@@ -106,8 +161,49 @@ export default function ArtistListPage() {
 
   if (loading) return <div className="text-muted-foreground">加载中...</div>;
 
+  // 艺人卡片渲染函数
+  function renderArtistCard(a: Artist) {
+    return (
+      <Card key={a.id}>
+        <CardContent className="p-3 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <Checkbox
+              checked={selectedIds.has(a.id)}
+              onCheckedChange={() => toggleSelect(a.id)}
+              aria-label={`选择 ${a.name}`}
+            />
+            <div className="p-2 rounded-full bg-muted shrink-0">
+              {a.type === 'singer' ? <Mic2 className="h-4 w-4 text-primary" /> : <Guitar className="h-4 w-4 text-primary" />}
+            </div>
+            <div className="min-w-0">
+              <div className="font-medium text-sm flex items-center gap-2">
+                <span className="truncate">{a.name}</span>
+                <Badge variant="outline" className="text-xs shrink-0">{a.type === 'singer' ? '歌手' : '乐手'}</Badge>
+              </div>
+              <div className="text-xs text-muted-foreground truncate">
+                {a.phone || '暂无电话'} · {a.style_tags.length > 0 ? a.style_tags.join(' / ') : '无风格标签'}
+              </div>
+              {links[a.id]?.length > 0 && (
+                <div className="text-xs text-muted-foreground mt-0.5 truncate">
+                  合作酒吧: {links[a.id].map((bid) => bars.find((b) => b.id === bid)?.name).filter(Boolean).join(', ')}
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="flex gap-1 shrink-0">
+            <Link to={`/artists/${a.id}/edit`}>
+              <Button variant="ghost" size="icon" className="h-9 w-9"><Pencil className="h-4 w-4" /></Button>
+            </Link>
+            <Button variant="ghost" size="icon" className="h-9 w-9 text-destructive" onClick={() => handleDelete(a.id)}><Trash2 className="h-4 w-4" /></Button>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
   return (
     <div className="space-y-4 pb-6">
+      {/* Header */}
       <div className="px-4 pt-2">
         <div className="flex flex-col gap-2">
           <div>
@@ -125,24 +221,59 @@ export default function ArtistListPage() {
         </div>
       </div>
 
-      <div className="flex flex-col gap-3 px-4">
-        <Input placeholder="搜索姓名/电话" value={search} onChange={(e) => setSearch(e.target.value)} className="h-11" />
-        <Select value={filterType} onValueChange={setFilterType}>
-          <SelectTrigger className="h-11"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">全部类型</SelectItem>
-            <SelectItem value="singer">歌手</SelectItem>
-            <SelectItem value="musician">乐手</SelectItem>
-          </SelectContent>
-        </Select>
+      {/* Tag filter bar */}
+      <div className="px-4 -mb-1">
+        <div className="flex gap-1.5 overflow-x-auto pb-1 scrollbar-none">
+          <button
+            onClick={() => setSelectedTag('all')}
+            className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-medium transition-colors whitespace-nowrap ${
+              selectedTag === 'all'
+                ? 'bg-primary text-primary-foreground'
+                : 'bg-muted text-muted-foreground hover:bg-muted/80'
+            }`}
+          >
+            全部{tagStats.total}
+          </button>
+          {tagStats.entries.map(([tag, count]) => (
+            <button
+              key={tag}
+              onClick={() => setSelectedTag(tag)}
+              className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-medium transition-colors whitespace-nowrap ${
+                selectedTag === tag
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-muted text-muted-foreground hover:bg-muted/80'
+              }`}
+            >
+              {tag}{count}
+            </button>
+          ))}
+          {tagStats.untagged > 0 && (
+            <button
+              onClick={() => setSelectedTag('未分类')}
+              className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-medium transition-colors whitespace-nowrap ${
+                selectedTag === '未分类'
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-muted text-muted-foreground hover:bg-muted/80'
+              }`}
+            >
+              未分类{tagStats.untagged}
+            </button>
+          )}
+        </div>
       </div>
 
-      {filtered.length === 0 ? (
+      {/* Search */}
+      <div className="px-4">
+        <Input placeholder="搜索姓名/电话" value={search} onChange={(e) => setSearch(e.target.value)} className="h-11" />
+      </div>
+
+      {/* Content */}
+      {visibleCount === 0 ? (
         <Card className="mx-4"><CardContent className="p-8 text-center text-muted-foreground">暂无艺人</CardContent></Card>
       ) : (
-        <div className="space-y-2 px-4">
+        <div className="space-y-4 px-4">
           {/* Batch toolbar */}
-          <div className="flex items-center justify-between gap-2 px-1">
+          <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <Checkbox
                 checked={isAllSelected}
@@ -161,42 +292,28 @@ export default function ArtistListPage() {
               </Button>
             )}
           </div>
-          {filtered.map((a) => (
-            <Card key={a.id}>
-              <CardContent className="p-3 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3 min-w-0">
-                  <Checkbox
-                    checked={selectedIds.has(a.id)}
-                    onCheckedChange={() => toggleSelect(a.id)}
-                    aria-label={`选择 ${a.name}`}
-                  />
-                  <div className="p-2 rounded-full bg-muted shrink-0">
-                    {a.type === 'singer' ? <Mic2 className="h-4 w-4 text-primary" /> : <Guitar className="h-4 w-4 text-primary" />}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="font-medium text-sm flex items-center gap-2">
-                      <span className="truncate">{a.name}</span>
-                      <Badge variant="outline" className="text-xs shrink-0">{a.type === 'singer' ? '歌手' : '乐手'}</Badge>
-                    </div>
-                    <div className="text-xs text-muted-foreground truncate">
-                      {a.phone || '暂无电话'} · {a.style_tags.length > 0 ? a.style_tags.join(' / ') : '无风格标签'}
-                    </div>
-                    {links[a.id]?.length > 0 && (
-                      <div className="text-xs text-muted-foreground mt-0.5 truncate">
-                        合作酒吧: {links[a.id].map((bid) => bars.find((b) => b.id === bid)?.name).filter(Boolean).join(', ')}
-                      </div>
-                    )}
-                  </div>
+
+          {/* 「全部」模式：按标签分区 */}
+          {selectedTag === 'all' && sections ? (
+            sections.map((section) => (
+              <div key={section.tag} className="space-y-2">
+                <div className="flex items-center gap-2 pt-1">
+                  <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                    {section.tag}
+                  </span>
+                  <span className="text-xs text-muted-foreground/60">· {section.artists.length}人</span>
                 </div>
-                <div className="flex gap-1 shrink-0">
-                  <Link to={`/artists/${a.id}/edit`}>
-                    <Button variant="ghost" size="icon" className="h-9 w-9"><Pencil className="h-4 w-4" /></Button>
-                  </Link>
-                  <Button variant="ghost" size="icon" className="h-9 w-9 text-destructive" onClick={() => handleDelete(a.id)}><Trash2 className="h-4 w-4" /></Button>
+                <div className="space-y-2">
+                  {section.artists.map(renderArtistCard)}
                 </div>
-              </CardContent>
-            </Card>
-          ))}
+              </div>
+            ))
+          ) : (
+            /* 单标签模式：扁平列表 */
+            <div className="space-y-2">
+              {filteredFlat.map(renderArtistCard)}
+            </div>
+          )}
         </div>
       )}
     </div>

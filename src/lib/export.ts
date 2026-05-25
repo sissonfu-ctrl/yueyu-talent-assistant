@@ -1,14 +1,12 @@
-import type { Bar, BarSession, ScheduleAssignment, Artist } from '@/types/types';
+import type { BarSession, ScheduleAssignment, Artist } from '@/types/types';
 
 export function exportToCSV(
-  bar: Bar,
   sessions: BarSession[],
   dates: string[],
   assignments: ScheduleAssignment[],
   artists: Artist[]
 ): string {
   const artistMap = new Map(artists.map((a) => [a.id, a]));
-  const sessionMap = new Map(sessions.map((s) => [s.id, s]));
 
   const header = ['日期', '星期', ...sessions.map((s) => `${s.session_name || `第${s.session_number}节`}(${s.singers_per_session}人)`)];
   const rows: string[][] = [];

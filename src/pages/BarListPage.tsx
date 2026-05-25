@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { getBars, deleteBar, getBarSessions, upsertBarSessions, deleteBarSession, createBar, updateBar } from '@/services/database';
-import type { Bar, BarSession } from '@/types/types';
+import { getBars, deleteBar, getBarSessions, upsertBarSessions, deleteBarSession, createBar, updateBar, getArtists, getArtistBarLinks, getBarArtistPrices, upsertBarArtistPrice, updateArtistBarPreferredSessions, linkArtistToBar, unlinkArtistFromBar } from '@/services/database';
+import type { Bar, BarSession, Artist, ArtistBarLink, BarArtistPrice } from '@/types/types';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from '@/components/ui/sheet';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -29,7 +31,10 @@ export default function BarListPage() {
     pool_type: 'open' as 'closed' | 'open',
     default_price_per_show: 0,
     rest_days: [] as number[],
+    replace_weekdays: [] as number[],
+    settlement_mode: 'weekly' as 'weekly' | 'monthly',
   });
+  const [selectedWeekday, setSelectedWeekday] = useState<number | null>(null);
   const [sessionForm, setSessionForm] = useState<{
     id?: string;
     weekday: number | null;
@@ -69,9 +74,12 @@ export default function BarListPage() {
       pool_type: 'open',
       default_price_per_show: 0,
       rest_days: [],
+      replace_weekdays: [],
+      settlement_mode: 'weekly',
     });
     setSessions([]);
     setSessionForm(null);
+    setSelectedWeekday(null);
     setDialogOpen(true);
   };
 
@@ -86,10 +94,15 @@ export default function BarListPage() {
       pool_type: bar.pool_type,
       default_price_per_show: bar.default_price_per_show,
       rest_days: bar.rest_days || [],
+      replace_weekdays: bar.replace_weekdays || [],
+      settlement_mode: bar.settlement_mode || 'weekly',
     });
     try {
-      const se = await getBarSessions(bar.id);
+      const [se] = await Promise.all([
+        getBarSessions(bar.id),
+      ]);
       setSessions(se);
+      loadPoolData(bar.id);
     } catch {}
     setSessionForm(null);
     setDialogOpen(true);
@@ -103,7 +116,7 @@ export default function BarListPage() {
     try {
       let barId = editing?.id;
       if (editing) {
-        await updateBar(editing.id, form);
+        await updateBar(editing.id, { ...form, replace_weekdays: form.replace_weekdays });
         toast.success('更新成功');
       } else {
         const created = await createBar(form as any);
@@ -138,10 +151,9 @@ export default function BarListPage() {
   };
 
   function addSession(weekday: number | null) {
-    const filtered = weekday !== null
-      ? sessions.filter((s) => s.weekday === weekday)
-      : sessions.filter((s) => s.weekday === null);
-    const maxNum = filtered.reduce((m, s) => Math.max(m, s.session_number), 0);
+    // Use global max session_number so weekday-specific sessions get correct numbering
+    // e.g., if generic has 第1/2/3节, a new Friday session should be session_number=4, not 1
+    const maxNum = sessions.reduce((m, s) => Math.max(m, s.session_number), 0);
     const newSession: BarSession = {
       id: `temp_${Date.now()}`,
       bar_id: editing?.id || '',
@@ -211,6 +223,87 @@ export default function BarListPage() {
     const current = form.rest_days || [];
     const next = current.includes(day) ? current.filter((d) => d !== day) : [...current, day];
     setForm({ ...form, rest_days: next });
+  }
+
+  // ── 歌手池状态（编辑弹窗内使用） ──
+  const [poolArtistsAll, setPoolArtistsAll] = useState<Artist[]>([]);
+  const [poolBarLinks, setPoolBarLinks] = useState<ArtistBarLink[]>([]);
+  const [poolPrices, setPoolPrices] = useState<BarArtistPrice[]>([]);
+  const [priceDialogOpen, setPriceDialogOpen] = useState(false);
+  const [priceForm, setPriceForm] = useState({ artist_id: '', price: 0 });
+
+  async function loadPoolData(barId: string) {
+    try {
+      const [a, links, pr] = await Promise.all([
+        getArtists(),
+        getArtistBarLinks(undefined, barId),
+        getBarArtistPrices(barId),
+      ]);
+      setPoolArtistsAll(a);
+      setPoolBarLinks(links);
+      setPoolPrices(pr);
+    } catch {}
+  }
+
+  const poolArtistIds = new Set(poolBarLinks.map((l) => l.artist_id));
+  const poolArtists = poolArtistsAll.filter((a) => poolArtistIds.has(a.id));
+  const availableArtists = poolArtistsAll.filter((a) => !poolArtistIds.has(a.id));
+
+  const getPoolPrice = (artistId: string) => {
+    const p = poolPrices.find((pr) => pr.artist_id === artistId);
+    return p ? p.price_per_show : (editing?.default_price_per_show || 0);
+  };
+
+  const getPreferredSessions = (artistId: string): number[] => {
+    const link = poolBarLinks.find((l) => l.artist_id === artistId);
+    return link?.preferred_sessions?.length ? link.preferred_sessions : [];
+  };
+
+  async function addToPool(artistId: string) {
+    if (!editing) return;
+    try {
+      await linkArtistToBar(artistId, editing.id);
+      await upsertBarArtistPrice({ bar_id: editing.id, artist_id: artistId, price_per_show: editing.default_price_per_show || 0 });
+      await loadPoolData(editing.id);
+      toast.success('已加入歌手池');
+    } catch (e: any) {
+      toast.error(e.message);
+    }
+  }
+
+  async function removeFromPool(artistId: string) {
+    if (!editing) return;
+    if (!confirm('确认从歌手池移除该歌手？')) return;
+    try {
+      await unlinkArtistFromBar(artistId, editing.id);
+      await loadPoolData(editing.id);
+      toast.success('已移除');
+    } catch (e: any) {
+      toast.error(e.message);
+    }
+  }
+
+  async function savePoolPrice() {
+    if (!editing) return;
+    try {
+      await upsertBarArtistPrice({ bar_id: editing.id, artist_id: priceForm.artist_id, price_per_show: priceForm.price });
+      await loadPoolData(editing.id);
+      setPriceDialogOpen(false);
+      toast.success('单价已设置');
+    } catch (e: any) {
+      toast.error(e.message);
+    }
+  }
+
+  async function handleUpdatePreferred(artistId: string, sessions: number[]) {
+    if (!editing) return;
+    setPoolBarLinks((prev) =>
+      prev.map((l) => (l.artist_id === artistId ? { ...l, preferred_sessions: sessions.length ? sessions : null } : l))
+    );
+    updateArtistBarPreferredSessions(artistId, editing.id, sessions.length ? sessions : null).catch((e: any) => {
+      toast.error(e.message);
+      loadPoolData(editing.id);
+    });
   }
 
   const genericSessions = sessions.filter((s) => s.weekday === null);
@@ -297,138 +390,336 @@ export default function BarListPage() {
       )}
       </div>
 
-      <Sheet open={dialogOpen} onOpenChange={setDialogOpen}>
-        <SheetContent side="bottom" className="max-h-[90dvh] overflow-y-auto flex flex-col p-0">
-          <SheetHeader className="px-4 pt-4 pb-2 border-b shrink-0">
-            <SheetTitle className="text-left">{editing ? '编辑酒吧' : '新增酒吧'}</SheetTitle>
-            <SheetDescription>填写酒吧基本信息并配置节次</SheetDescription>
-          </SheetHeader>
-          <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
-            <div className="space-y-2">
-              <Label>酒吧名称 *</Label>
-              <Input className="h-11" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-            </div>
-            <div className="space-y-2">
-              <Label>地址</Label>
-              <Input className="h-11" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
-            </div>
-            <div className="space-y-2">
-              <Label>联系方式</Label>
-              <Input className="h-11" value={form.contact} onChange={(e) => setForm({ ...form, contact: e.target.value })} />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>排班周期</Label>
-                <Select value={form.schedule_cycle_type} onValueChange={(v: any) => setForm({ ...form, schedule_cycle_type: v })}>
-                  <SelectTrigger className="h-11"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="weekly">一周一排</SelectItem>
-                    <SelectItem value="monthly">一月一排</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-2">
-                <Label>每晚节数</Label>
-                <Input className="h-11" type="number" min={1} max={10} value={form.sessions_per_night} onChange={(e) => setForm({ ...form, sessions_per_night: parseInt(e.target.value) || 1 })} />
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>歌手池类型</Label>
-                <Select value={form.pool_type} onValueChange={(v: any) => setForm({ ...form, pool_type: v })}>
-                  <SelectTrigger className="h-11"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="open">开放型（可外部顶班）</SelectItem>
-                    <SelectItem value="closed">封闭型（仅内部调配）</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-2">
-                <Label>统一单价（元/场）</Label>
-                <Input className="h-11" type="number" min={0} value={form.default_price_per_show} onChange={(e) => setForm({ ...form, default_price_per_show: parseFloat(e.target.value) || 0 })} />
-              </div>
-            </div>
-
-            {/* 休息日 */}
-            <div className="space-y-2 pt-2 border-t border-border">
-              <Label>休息日</Label>
-              <div className="flex flex-wrap gap-3">
-                {WEEKDAYS.map((label, idx) => (
-                  <div key={idx} className="flex items-center space-x-1.5">
-                    <Checkbox id={`rest-${idx}`} checked={(form.rest_days || []).includes(idx)} onCheckedChange={() => toggleRestDay(idx)} />
-                    <label htmlFor={`rest-${idx}`} className="text-sm cursor-pointer">{label}</label>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* 通用节次配置 */}
-            <div className="space-y-2 pt-2 border-t border-border">
-              <div className="flex items-center justify-between">
-                <Label>通用节次配置</Label>
-                <Button size="sm" variant="outline" onClick={() => addSession(null)}><Plus className="h-3.5 w-3.5 mr-1" />新增通用节次</Button>
-              </div>
-              {genericSessions.length === 0 ? (
-                <p className="text-xs text-muted-foreground">暂无通用配置</p>
-              ) : (
-                <div className="space-y-1">
-                  {genericSessions.map((s) => (
-                    <div key={s.id} className="flex items-center justify-between p-2 border border-border rounded-md text-sm">
-                      <div className="min-w-0">
-                        <span>{s.session_name || `第${s.session_number}节`} {s.start_time && s.end_time ? `(${s.start_time}~${s.end_time})` : ''}</span>
-                        <span className="text-xs text-muted-foreground ml-2">需{s.singers_per_session}人 · {s.style_tags?.join(', ') || '不限'}</span>
-                      </div>
-                      <div className="flex gap-1 shrink-0">
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openSessionEdit(s)}><Pencil className="h-3.5 w-3.5" /></Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => removeSession(s)}><Trash2 className="h-3.5 w-3.5" /></Button>
-                      </div>
-                    </div>
-                  ))}
+      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <DialogContent className="max-w-2xl max-h-[90dvh] overflow-hidden flex flex-col p-0">
+          <DialogHeader className="px-4 pt-4 pb-2 border-b shrink-0 text-left">
+            <DialogTitle>{editing ? '编辑酒吧' : '新增酒吧'}</DialogTitle>
+            <DialogDescription>
+              {editing ? '修改基本信息、节次配置和歌手池' : '填写酒吧基本信息并配置节次'}
+            </DialogDescription>
+          </DialogHeader>
+          <Tabs defaultValue="info" className="flex-1 flex flex-col min-h-0">
+            <TabsList className="mx-4 mt-2 shrink-0">
+              <TabsTrigger value="info">基本信息</TabsTrigger>
+              <TabsTrigger value="sessions">节次配置</TabsTrigger>
+              {editing && <TabsTrigger value="pool">歌手池管理</TabsTrigger>}
+            </TabsList>
+            <div className="flex-1 overflow-y-auto px-4 py-4">
+              {/* ── Tab 1: 基本信息 ── */}
+              <TabsContent value="info" className="space-y-4 mt-0">
+                <div className="space-y-2">
+                  <Label>酒吧名称 *</Label>
+                  <Input className="h-11" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
                 </div>
-              )}
-            </div>
-
-            {/* 按星期特殊配置 */}
-            <div className="space-y-2 pt-2 border-t border-border">
-              <Label>按星期特殊配置</Label>
-              <div className="space-y-3">
-                {WEEKDAYS.map((label, idx) => (
-                  <div key={idx} className="border border-border rounded-md p-2">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-sm font-medium">{label}</span>
-                      <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => addSession(idx)}><Plus className="h-3 w-3 mr-1" />添加覆盖</Button>
+                <div className="space-y-2">
+                  <Label>地址</Label>
+                  <Input className="h-11" value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
+                </div>
+                <div className="space-y-2">
+                  <Label>联系方式</Label>
+                  <Input className="h-11" value={form.contact} onChange={(e) => setForm({ ...form, contact: e.target.value })} />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>排班周期</Label>
+                    <Select value={form.schedule_cycle_type} onValueChange={(v: any) => setForm({ ...form, schedule_cycle_type: v })}>
+                      <SelectTrigger className="h-11"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="weekly">一周一排</SelectItem>
+                        <SelectItem value="monthly">一月一排</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>每晚节数</Label>
+                    <Input className="h-11" type="number" min={1} max={10} value={form.sessions_per_night} onChange={(e) => setForm({ ...form, sessions_per_night: parseInt(e.target.value) || 1 })} />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>歌手池类型</Label>
+                    <Select value={form.pool_type} onValueChange={(v: any) => setForm({ ...form, pool_type: v })}>
+                      <SelectTrigger className="h-11"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="open">开放型（可外部顶班）</SelectItem>
+                        <SelectItem value="closed">封闭型（仅内部调配）</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>统一单价（元/场）</Label>
+                    <Input className="h-11" type="number" min={0} value={form.default_price_per_show} onChange={(e) => setForm({ ...form, default_price_per_show: parseFloat(e.target.value) || 0 })} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>结算方式</Label>
+                    <div className="flex gap-4 mt-1">
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input type="radio" checked={form.settlement_mode === 'weekly'} onChange={() => setForm({ ...form, settlement_mode: 'weekly' })} />
+                        <span className="text-sm">周结</span>
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer">
+                        <input type="radio" checked={form.settlement_mode === 'monthly'} onChange={() => setForm({ ...form, settlement_mode: 'monthly' })} />
+                        <span className="text-sm">月结</span>
+                      </label>
                     </div>
-                    {weekdaySessions[idx].length === 0 ? (
-                      <p className="text-xs text-muted-foreground">使用通用配置</p>
-                    ) : (
-                      <div className="space-y-1">
-                        {weekdaySessions[idx].map((s) => (
-                          <div key={s.id} className="flex items-center justify-between p-1.5 bg-muted/30 rounded text-sm">
-                            <div className="min-w-0">
-                              <span>{s.session_name || `第${s.session_number}节`} {s.start_time && s.end_time ? `(${s.start_time}~${s.end_time})` : ''}</span>
-                              <span className="text-xs text-muted-foreground ml-2">需{s.singers_per_session}人 · {s.style_tags?.join(', ') || '不限'}</span>
+                  </div>
+                </div>
+                <div className="space-y-2 pt-2 border-t border-border">
+                  <Label>休息日</Label>
+                  <div className="flex flex-wrap gap-3">
+                    {WEEKDAYS.map((label, idx) => (
+                      <div key={idx} className="flex items-center space-x-1.5">
+                        <Checkbox id={`rest-${idx}`} checked={(form.rest_days || []).includes(idx)} onCheckedChange={() => toggleRestDay(idx)} />
+                        <label htmlFor={`rest-${idx}`} className="text-sm cursor-pointer">{label}</label>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </TabsContent>
+
+              {/* ── Tab 2: 节次配置 ── */}
+              <TabsContent value="sessions" className="space-y-4 mt-0">
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label>通用节次配置</Label>
+                    <Button size="sm" variant="outline" onClick={() => addSession(null)}><Plus className="h-3.5 w-3.5 mr-1" />新增通用节次</Button>
+                  </div>
+                  {genericSessions.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">暂无通用配置</p>
+                  ) : (
+                    <div className="space-y-1">
+                      {genericSessions.map((s) => (
+                        <div key={s.id} className="flex items-center justify-between p-2 border border-border rounded-md text-sm">
+                          <div className="min-w-0">
+                            <span>{s.session_name || `第${s.session_number}节`} {s.start_time && s.end_time ? `(${s.start_time}~${s.end_time})` : ''}</span>
+                            <span className="text-xs text-muted-foreground ml-2">需{s.singers_per_session}人 · {s.style_tags?.join(', ') || '不限'}</span>
+                          </div>
+                          <div className="flex gap-1 shrink-0">
+                            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openSessionEdit(s)}><Pencil className="h-3.5 w-3.5" /></Button>
+                            <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => removeSession(s)}><Trash2 className="h-3.5 w-3.5" /></Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-3 pt-2 border-t border-border">
+                  <Label>按星期特殊配置</Label>
+                  <Select value={selectedWeekday !== null ? String(selectedWeekday) : ''} onValueChange={(v) => setSelectedWeekday(v ? parseInt(v) : null)}>
+                    <SelectTrigger className="h-11">
+                      <SelectValue placeholder="选择星期..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {WEEKDAYS.map((label, idx) => {
+                        const specCount = weekdaySessions[idx].length;
+                        const genCount = genericSessions.length;
+                        const isReplace = (form.replace_weekdays || []).includes(idx);
+                        const totalCount = isReplace ? specCount : genCount + specCount;
+                        return (
+                          <SelectItem key={idx} value={String(idx)}>
+                            <span className="flex items-center gap-2">
+                              <span>{label}</span>
+                              <span className="text-xs text-muted-foreground">
+                                ({totalCount}节{isReplace ? '，覆盖' : ''})
+                              </span>
+                            </span>
+                          </SelectItem>
+                        );
+                      })}
+                    </SelectContent>
+                  </Select>
+
+                  {selectedWeekday !== null && (() => {
+                    const idx = selectedWeekday;
+                    const label = WEEKDAYS[idx];
+                    const specSessions = weekdaySessions[idx];
+                    const specCount = specSessions.length;
+                    const genCount = genericSessions.length;
+                    const isReplace = (form.replace_weekdays || []).includes(idx);
+                    const totalCount = isReplace ? specCount : genCount + specCount;
+                    return (
+                      <div className={`border rounded-md p-3 ${isReplace ? 'border-destructive/30 bg-destructive/5' : 'border-border'}`}>
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-sm">{label}</span>
+                            {isReplace ? (
+                              <span className="text-sm font-medium text-destructive">共 {totalCount} 节（覆盖通用）</span>
+                            ) : (
+                              <span className="text-sm text-muted-foreground">共 {totalCount} 节（通用{genCount}+特殊{specCount}）</span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-1.5">
+                              <Checkbox id={`replace-list-${idx}`} checked={isReplace} onCheckedChange={() => toggleReplaceWeekday(idx)} />
+                              <label htmlFor={`replace-list-${idx}`} className="text-xs cursor-pointer text-muted-foreground">覆盖通用</label>
                             </div>
-                            <div className="flex gap-1 shrink-0">
-                              <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => openSessionEdit(s)}><Pencil className="h-3 w-3" /></Button>
-                              <Button variant="ghost" size="icon" className="h-6 w-6 text-destructive" onClick={() => removeSession(s)}><Trash2 className="h-3 w-3" /></Button>
+                            <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => addSession(idx)}><Plus className="h-3 w-3 mr-1" />添加覆盖</Button>
+                          </div>
+                        </div>
+                        {!isReplace && genericSessions.length > 0 && (
+                          <div className="mb-2">
+                            <div className="text-[10px] text-muted-foreground mb-1">通用节次</div>
+                            <div className="space-y-1 opacity-60">
+                              {genericSessions.map((s) => (
+                                <div key={s.id} className="flex items-center p-2 bg-muted/20 rounded border border-dashed border-border">
+                                  <span className="text-sm text-muted-foreground">{s.session_name || `第${s.session_number}节`} {s.start_time && s.end_time ? `(${s.start_time}~${s.end_time})` : ''} · {s.singers_per_session}人</span>
+                                </div>
+                              ))}
                             </div>
                           </div>
+                        )}
+                        {specCount > 0 && (
+                          <div>
+                            <div className="text-[10px] text-muted-foreground mb-1">{label}特殊节次</div>
+                            <div className="space-y-1">
+                              {specSessions.map((s) => (
+                                <div key={s.id} className="flex items-center justify-between p-2 bg-muted/30 rounded text-sm">
+                                  <div className="min-w-0">
+                                    <span>{s.session_name || `第${s.session_number}节`} {s.start_time && s.end_time ? `(${s.start_time}~${s.end_time})` : ''}</span>
+                                    <span className="text-xs text-muted-foreground ml-2">需{s.singers_per_session}人 · {s.style_tags?.join(', ') || '不限'}</span>
+                                  </div>
+                                  <div className="flex gap-1 shrink-0">
+                                    <Button variant="ghost" size="icon" className="h-6 w-6" onClick={() => openSessionEdit(s)}><Pencil className="h-3 w-3" /></Button>
+                                    <Button variant="ghost" size="icon" className="h-6 w-6 text-destructive" onClick={() => removeSession(s)}><Trash2 className="h-3 w-3" /></Button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {genCount === 0 && specCount === 0 && (
+                          <p className="text-xs text-muted-foreground">暂无节次配置</p>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              </TabsContent>
+
+              {/* ── Tab 3: 歌手池管理（仅编辑时） ── */}
+              {editing && (
+                <TabsContent value="pool" className="space-y-4 mt-0">
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-semibold">本店歌手池（{poolArtists.length}人）</h3>
+                  </div>
+                  {poolArtists.length === 0 ? (
+                    <Card><CardContent className="p-6 text-center text-muted-foreground">暂无歌手，请从下方添加</CardContent></Card>
+                  ) : (
+                    <div className="space-y-2">
+                      {poolArtists.map((a) => {
+                        const prefSessions = getPreferredSessions(a.id);
+                        const availablePrefs = [1, 2, 3, 4].filter((s) => !prefSessions.includes(s));
+                        return (
+                        <Card key={a.id}>
+                          <CardContent className="p-3 space-y-2">
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="font-medium text-sm truncate">{a.name}</div>
+                                <div className="text-xs text-muted-foreground truncate">
+                                  {a.style_tags.join(' / ') || '无风格标签'}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <span className="text-xs text-muted-foreground">{getPoolPrice(a.id)}元/场</span>
+                                <Button variant="ghost" size="sm" onClick={() => { setPriceForm({ artist_id: a.id, price: getPoolPrice(a.id) }); setPriceDialogOpen(true); }}>改价</Button>
+                                <Button variant="ghost" size="sm" className="text-destructive" onClick={() => removeFromPool(a.id)}>移除</Button>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-xs text-muted-foreground shrink-0">偏好节次：</span>
+                              {prefSessions.length === 0 ? (
+                                <span className="text-xs text-muted-foreground">(无)</span>
+                              ) : (
+                                prefSessions.map((sessionNum, idx) => (
+                                  <span
+                                    key={`${a.id}_${sessionNum}`}
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-primary/10 text-primary text-xs cursor-grab active:cursor-grabbing select-none group"
+                                    draggable
+                                    onDragStart={(e) => e.dataTransfer.setData('text/plain', `${a.id}:${idx}`)}
+                                    onDragOver={(e) => e.preventDefault()}
+                                    onDrop={(e) => {
+                                      e.preventDefault();
+                                      const [sourceArtist, sourceIdxStr] = e.dataTransfer.getData('text/plain').split(':');
+                                      if (sourceArtist !== a.id) return;
+                                      const fromIdx = Number(sourceIdxStr);
+                                      if (fromIdx === idx) return;
+                                      const newSessions = [...prefSessions];
+                                      const [moved] = newSessions.splice(fromIdx, 1);
+                                      newSessions.splice(idx, 0, moved);
+                                      handleUpdatePreferred(a.id, newSessions);
+                                    }}
+                                  >
+                                    <span className="text-[10px] font-bold">#{idx + 1}</span>
+                                    <span>第{sessionNum}节</span>
+                                    <button
+                                      className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] text-destructive ml-0.5"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleUpdatePreferred(a.id, prefSessions.filter((s) => s !== sessionNum));
+                                      }}
+                                    >✕</button>
+                                  </span>
+                                ))
+                              )}
+                              {availablePrefs.length > 0 && (
+                                <select
+                                  className="text-xs border rounded px-1 py-0.5 bg-background"
+                                  value=""
+                                  onChange={(e) => {
+                                    const v = Number(e.target.value);
+                                    if (!v) return;
+                                    handleUpdatePreferred(a.id, [...prefSessions, v]);
+                                    e.target.value = '';
+                                  }}
+                                >
+                                  <option value="">＋添加</option>
+                                  {availablePrefs.map((s) => (
+                                    <option key={s} value={s}>第{s}节</option>
+                                  ))}
+                                </select>
+                              )}
+                            </div>
+                          </CardContent>
+                        </Card>
+                      )})}
+                    </div>
+                  )}
+                  <div className="pt-4 border-t border-border">
+                    <h3 className="font-semibold mb-2">可加入歌手池</h3>
+                    {availableArtists.length === 0 ? (
+                      <p className="text-sm text-muted-foreground">暂无可用歌手，请先到艺人管理添加歌手</p>
+                    ) : (
+                      <div className="space-y-2">
+                        {availableArtists.map((a) => (
+                          <Card key={a.id}>
+                            <CardContent className="p-3 flex items-center justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="font-medium text-sm truncate">{a.name}</div>
+                                <div className="text-xs text-muted-foreground truncate">{a.style_tags.join(' / ') || '无风格标签'}</div>
+                              </div>
+                              <Button size="sm" variant="outline" onClick={() => addToPool(a.id)}>
+                                <Plus className="h-3.5 w-3.5 mr-1" />加入
+                              </Button>
+                            </CardContent>
+                          </Card>
                         ))}
                       </div>
                     )}
                   </div>
-                ))}
-              </div>
+                </TabsContent>
+              )}
             </div>
-
+          </Tabs>
+          <div className="px-4 py-3 border-t shrink-0">
             <Button className="w-full h-12 text-base" onClick={handleSubmit}>
               {editing ? '保存修改' : '创建酒吧'}
             </Button>
           </div>
-        </SheetContent>
-      </Sheet>
+        </DialogContent>
+      </Dialog>
 
-      {/* 节次编辑弹窗 */}
+      {/* 节次编辑弹窗（保留） */}
       <Sheet open={!!sessionForm} onOpenChange={(open) => { if (!open) setSessionForm(null); }}>
         <SheetContent side="bottom" className="max-h-[85dvh] overflow-y-auto flex flex-col p-0">
           <SheetHeader className="px-4 pt-4 pb-2 border-b shrink-0">
@@ -494,6 +785,21 @@ export default function BarListPage() {
           )}
         </SheetContent>
       </Sheet>
+
+      {/* 改价弹窗 */}
+      <Dialog open={priceDialogOpen} onOpenChange={setPriceDialogOpen}>
+        <DialogContent className="max-w-[calc(100%-2rem)] md:max-w-sm">
+          <DialogHeader><DialogTitle>设置专属单价</DialogTitle></DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-2">
+              <Label>单价（元/场）</Label>
+              <Input type="number" value={priceForm.price} onChange={(e) => setPriceForm({ ...priceForm, price: parseFloat(e.target.value) || 0 })} />
+              {editing && <p className="text-xs text-muted-foreground">不设置则使用酒吧统一价 {editing.default_price_per_show} 元</p>}
+            </div>
+            <Button className="w-full" onClick={savePoolPrice}>保存</Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

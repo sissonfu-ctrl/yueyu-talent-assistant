@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
-import { getArtists, getAvailabilities, createAvailability, createArtist, updateAvailability, deleteAvailabilities, deleteAvailability, deleteAllArtistAvailabilities } from '@/services/database';
-import type { Artist, ArtistAvailability } from '@/types/types';
+import { useEffect, useState, useMemo } from 'react';
+import { useLocation } from 'react-router-dom';
+import { getArtists, getAvailabilities, createAvailability, createArtist, updateAvailability, deleteAvailabilities, deleteAvailability, deleteAllArtistAvailabilities, updateArtist, getArtistBarLinks, getBars } from '@/services/database';
+import type { Artist, ArtistAvailability, Bar } from '@/types/types';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -11,7 +12,7 @@ import { Checkbox } from '@/components/ui/checkbox';
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { Badge } from '@/components/ui/badge';
 import { toast } from 'sonner';
-import { Plus, ClipboardList, Search, Trash2, ChevronDown, ChevronRight, Pencil } from 'lucide-react';
+import { Plus, ClipboardList, Search, Trash2, ChevronDown, ChevronRight, Pencil, ChevronUp } from 'lucide-react';
 
 const weekDays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
@@ -61,27 +62,22 @@ function extractDate(text: string): { value: string; type: 'temporary' } | null 
 }
 
 function extractTime(text: string): { start: string; end: string } | null {
-  const match = text.match(/(\d{1,2}:\d{2})\s*[-~—到至]+\s*(\d{1,2}:\d{2})/);
-  if (match) {
-    return { start: match[1], end: match[2] };
+  const times = text.match(/\d{1,2}:\d{2}/g);
+  if (!times || times.length === 0) return null;
+  if (times.length >= 2) {
+    return { start: times[times.length - 2], end: times[times.length - 1] };
   }
-  const single = text.match(/(\d{1,2}:\d{2})/);
-  if (single) {
-    return { start: single[1], end: '23:00' };
-  }
-  return null;
+  return { start: times[0], end: '23:00' };
 }
 
 function smartParseLine(line: string): PasteRow | null {
   const trimmed = line.trim();
   if (!trimmed) return null;
 
-  // Skip header
   const headerKeywords = ['歌手', '姓名', '档期', '类型', '星期', '日期', '时间', '备注'];
   const isHeader = headerKeywords.some((kw) => trimmed.includes(kw)) && !/\d{2}:\d{2}/.test(trimmed);
   if (isHeader) return null;
 
-  // Strategy 1: Standard 3-column format (tab/comma/space separated)
   const parts = trimmed.includes('\t')
     ? trimmed.split('\t')
     : trimmed.includes(',')
@@ -107,6 +103,10 @@ function smartParseLine(line: string): PasteRow | null {
     if (time) {
       开始时间 = time.start;
       结束时间 = time.end;
+    }
+    if (cells[3]) {
+      const endMatch = cells[3].match(/\d{1,2}:\d{2}/);
+      if (endMatch) 结束时间 = endMatch[0];
     }
   } else {
     const dateInfo = extractDate(trimmed);
@@ -160,16 +160,17 @@ function parsePasteText(text: string): PasteRow[] {
 
 export default function ArtistAvailabilityPage() {
   const [artists, setArtists] = useState<Artist[]>([]);
+  const [bars, setBars] = useState<Bar[]>([]);
+  const [barPriorities, setBarPriorities] = useState<Record<string, string[]>>({}); // artistId -> ordered bar IDs
   const [availabilities, setAvailabilities] = useState<ArtistAvailability[]>([]);
   const [loading, setLoading] = useState(true);
+  const [selectedTag, setSelectedTag] = useState('all');
   const [search, setSearch] = useState('');
-  const [selectedArtistId, setSelectedArtistId] = useState('all');
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [dialogArtistId, setDialogArtistId] = useState('');
   const [editingAvailId, setEditingAvailId] = useState<string | null>(null);
 
-  // Batch edit dialog
   const [batchEditOpen, setBatchEditOpen] = useState(false);
   const [batchEditForm, setBatchEditForm] = useState<{
     availability_type: 'fixed' | 'temporary' | '';
@@ -203,22 +204,42 @@ export default function ArtistAvailabilityPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [expandedArtists, setExpandedArtists] = useState<Set<string>>(new Set());
 
-  // Paste dialog
   const [pasteDialogOpen, setPasteDialogOpen] = useState(false);
   const [pasteText, setPasteText] = useState('');
   const [pastePreview, setPastePreview] = useState<PasteRow[]>([]);
 
+  const location = useLocation();
 
   useEffect(() => {
     loadData();
-  }, []);
+  }, [location.key]);
 
   async function loadData() {
     setLoading(true);
     try {
-      const [a, av] = await Promise.all([getArtists(), getAvailabilities()]);
+      const [a, av, b, allLinks] = await Promise.all([
+        getArtists(),
+        getAvailabilities(),
+        getBars(),
+        getArtistBarLinks(),
+      ]);
       setArtists(a);
       setAvailabilities(av);
+      setBars(b);
+      // 初始化优先级：已有就用已有的，没有则按 link 顺序
+      const priorities: Record<string, string[]> = {};
+      const artistBarMap: Record<string, string[]> = {};
+      allLinks.forEach((l) => {
+        if (!artistBarMap[l.artist_id]) artistBarMap[l.artist_id] = [];
+        artistBarMap[l.artist_id].push(l.bar_id);
+      });
+      a.forEach((artist) => {
+        const links = artistBarMap[artist.id] || [];
+        priorities[artist.id] = artist.bar_priority?.length
+          ? artist.bar_priority.filter((bid) => links.includes(bid))
+          : links;
+      });
+      setBarPriorities(priorities);
     } catch (e) {
       toast.error('加载失败');
     } finally {
@@ -226,14 +247,101 @@ export default function ArtistAvailabilityPage() {
     }
   }
 
-  const filteredAvail = availabilities.filter((a) => {
-    if (selectedArtistId !== 'all' && a.artist_id !== selectedArtistId) return false;
-    if (search) {
-      const artist = artists.find((ar) => ar.id === a.artist_id);
-      if (!artist?.name.includes(search)) return false;
-    }
-    return true;
-  });
+  // 动态标签统计（只统计有档期的歌手）
+  const tagStats = useMemo(() => {
+    const artistIdsWithAvail = new Set(availabilities.map((a) => a.artist_id));
+    const counts: Record<string, number> = {};
+    let untagged = 0;
+    artists.forEach((a) => {
+      if (!artistIdsWithAvail.has(a.id)) return;
+      if (a.style_tags.length === 0) {
+        untagged++;
+      } else {
+        a.style_tags.forEach((tag) => {
+          counts[tag] = (counts[tag] || 0) + 1;
+        });
+      }
+    });
+    const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+    return { entries, untagged };
+  }, [artists, availabilities]);
+
+  // 过滤后的档期
+  const filteredAvail = useMemo(() => {
+    return availabilities.filter((a) => {
+      if (search) {
+        const artist = artists.find((ar) => ar.id === a.artist_id);
+        if (!artist?.name.includes(search)) return false;
+      }
+      if (selectedTag === '未分类') {
+        const artist = artists.find((ar) => ar.id === a.artist_id);
+        return artist ? artist.style_tags.length === 0 : false;
+      }
+      if (selectedTag !== 'all') {
+        const artist = artists.find((ar) => ar.id === a.artist_id);
+        return artist ? artist.style_tags.includes(selectedTag) : false;
+      }
+      return true;
+    });
+  }, [availabilities, artists, search, selectedTag]);
+
+  // 「全部」模式：按标签分区，每个区内按歌手分组
+  const sections = useMemo(() => {
+    if (selectedTag !== 'all') return null;
+
+    const artistAvailMap = new Map<string, ArtistAvailability[]>();
+    filteredAvail.forEach((a) => {
+      if (!artistAvailMap.has(a.artist_id)) artistAvailMap.set(a.artist_id, []);
+      artistAvailMap.get(a.artist_id)!.push(a);
+    });
+
+    // 按标签分区
+    const result: { tag: string; groups: { artistId: string; artistName: string; items: ArtistAvailability[] }[] }[] = [];
+
+    // 已分配过的 artist
+    const assignedArtistIds = new Set<string>();
+
+    tagStats.entries.forEach(([tag]) => {
+      const groups: { artistId: string; artistName: string; items: ArtistAvailability[] }[] = [];
+      artistAvailMap.forEach((items, artistId) => {
+        if (assignedArtistIds.has(artistId)) return;
+        const artist = artists.find((ar) => ar.id === artistId);
+        if (artist?.style_tags.includes(tag)) {
+          groups.push({ artistId, artistName: artist.name, items });
+          assignedArtistIds.add(artistId);
+        }
+      });
+      if (groups.length > 0) result.push({ tag, groups });
+    });
+
+    // 未分类
+    const untaggedGroups: { artistId: string; artistName: string; items: ArtistAvailability[] }[] = [];
+    artistAvailMap.forEach((items, artistId) => {
+      if (assignedArtistIds.has(artistId)) return;
+      const artist = artists.find((ar) => ar.id === artistId);
+      if (!artist || artist.style_tags.length === 0) {
+        untaggedGroups.push({ artistId, artistName: artist?.name || '-', items });
+      }
+    });
+    if (untaggedGroups.length > 0) result.push({ tag: '未分类', groups: untaggedGroups });
+
+    return result;
+  }, [filteredAvail, selectedTag, artists, tagStats]);
+
+  // 单标签模式：按歌手分组
+  const groupedAvail = useMemo(() => {
+    if (selectedTag === 'all') return null;
+    const map = new Map<string, ArtistAvailability[]>();
+    filteredAvail.forEach((a) => {
+      if (!map.has(a.artist_id)) map.set(a.artist_id, []);
+      map.get(a.artist_id)!.push(a);
+    });
+    return Array.from(map.entries()).map(([artistId, items]) => ({
+      artistId,
+      artistName: artists.find((ar) => ar.id === artistId)?.name || '-',
+      items,
+    }));
+  }, [filteredAvail, selectedTag, artists]);
 
   const allFilteredIds = filteredAvail.map((a) => a.id);
   const isAllSelected = filteredAvail.length > 0 && allFilteredIds.every((id) => selectedIds.has(id));
@@ -264,7 +372,6 @@ export default function ArtistAvailabilityPage() {
 
   const handleBatchDelete = async () => {
     if (selectedIds.size === 0) return;
-    if (!confirm(`确定删除选中的 ${selectedIds.size} 条档期？`)) return;
     try {
       await deleteAvailabilities(Array.from(selectedIds));
       toast.success(`已删除 ${selectedIds.size} 条档期`);
@@ -276,7 +383,6 @@ export default function ArtistAvailabilityPage() {
   };
 
   const handleDeleteArtistAvailabilities = async (artistId: string) => {
-    if (!confirm('确定删除该歌手的所有档期？')) return;
     try {
       await deleteAllArtistAvailabilities(artistId);
       toast.success('已删除该歌手所有档期');
@@ -361,19 +467,16 @@ export default function ArtistAvailabilityPage() {
       : availabilities.filter((a) => selectedIds.has(a.id));
     if (selected.length === 0) return;
 
-    // Check same artist
     const artistsInSelection = new Set(selected.map((a) => a.artist_id));
     if (artistsInSelection.size > 1) {
       toast.error('批量编辑只能针对同一个歌手');
       return;
     }
 
-    // 如果是通过歌手卡片调用的，设置 selectedIds 为该歌手所有档期
     if (artistId) {
       setSelectedIds(new Set(selected.map((s) => s.id)));
     }
 
-    // Compute common values
     const allSameStr = (key: 'availability_type') => {
       const vals = selected.map((s) => s[key]);
       return vals.every((v) => v === vals[0]) ? vals[0] : undefined;
@@ -404,7 +507,6 @@ export default function ArtistAvailabilityPage() {
       is_available: availVal !== undefined ? availVal : null,
       note: noteVal || '',
     });
-    // 初始化星期复选框：当前选中的档期覆盖了哪些星期
     const existingDays = new Set<number>();
     selected.forEach((s) => {
       if (s.day_of_week !== null && s.day_of_week !== undefined) existingDays.add(s.day_of_week);
@@ -426,7 +528,6 @@ export default function ArtistAvailabilityPage() {
     });
 
     try {
-      // 1. 删除取消勾选的星期
       for (const day of existingDays) {
         if (!batchEditWeekDays.has(day)) {
           const toDelete = selected.find((s) => s.day_of_week === day);
@@ -434,7 +535,6 @@ export default function ArtistAvailabilityPage() {
         }
       }
 
-      // 2. 更新保留的档期（如果勾选了其他字段）
       for (const day of batchEditWeekDays) {
         const record = selected.find((s) => s.day_of_week === day);
         if (record && batchEditFields.size > 0) {
@@ -453,7 +553,6 @@ export default function ArtistAvailabilityPage() {
         }
       }
 
-      // 3. 创建新勾选的星期
       for (const day of batchEditWeekDays) {
         if (!existingDays.has(day)) {
           const payload: Partial<ArtistAvailability> = {
@@ -491,7 +590,6 @@ export default function ArtistAvailabilityPage() {
     if (availForm.availability_type === 'fixed') {
       payload.specific_date = null;
     } else {
-      // temporary: 如果填了具体日期就用日期，否则用星期
       if (availForm.specific_date) {
         payload.day_of_week = null;
         payload.specific_date = availForm.specific_date.split('T')[0];
@@ -531,7 +629,6 @@ export default function ArtistAvailabilityPage() {
   async function confirmPasteImport() {
     if (pastePreview.length === 0) return;
     try {
-      // Local cache to avoid duplicate artist creation within the same import batch
       const artistCache = new Map<string, string>();
       for (const row of pastePreview) {
         let artistId = artistCache.get(row.歌手姓名);
@@ -563,12 +660,12 @@ export default function ArtistAvailabilityPage() {
           note: '',
         };
 
-        // 根据输入内容自动决定 day_of_week 或 specific_date，不绑定类型
         if (row.星期或日期 && /^\d{4}-\d{2}-\d{2}$/.test(row.星期或日期)) {
           payload.specific_date = row.星期或日期;
           payload.day_of_week = null;
         } else {
-          payload.day_of_week = parseInt(row.星期或日期) || null;
+          const dow = parseInt(row.星期或日期);
+          payload.day_of_week = isNaN(dow) ? null : dow;
           payload.specific_date = null;
         }
 
@@ -584,11 +681,197 @@ export default function ArtistAvailabilityPage() {
     }
   }
 
-  function getArtistName(id: string) {
-    return artists.find((a) => a.id === id)?.name || '-';
+  if (loading) return <div className="text-muted-foreground">加载中...</div>;
+
+  // 移动酒吧优先级
+  async function moveBarPriority(artistId: string, fromIdx: number, toIdx: number) {
+    const current = [...(barPriorities[artistId] || [])];
+    if (toIdx < 0 || toIdx >= current.length) return;
+    const [moved] = current.splice(fromIdx, 1);
+    current.splice(toIdx, 0, moved);
+    setBarPriorities((prev) => ({ ...prev, [artistId]: current }));
+    try {
+      await updateArtist(artistId, { bar_priority: current });
+    } catch { /* silent */ }
   }
 
-  if (loading) return <div className="text-muted-foreground">加载中...</div>;
+  // 渲染歌手卡片（可折叠）
+  function renderArtistGroup(artistId: string, artistName: string, items: ArtistAvailability[]) {
+    const isExpanded = expandedArtists.has(artistId);
+    const allItemIds = items.map((i) => i.id);
+    const artistAllSelected = allItemIds.every((id) => selectedIds.has(id));
+    const artistSomeSelected = allItemIds.some((id) => selectedIds.has(id));
+
+    const toggleArtistSelect = () => {
+      if (artistAllSelected) {
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          allItemIds.forEach((id) => next.delete(id));
+          return next;
+        });
+      } else {
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          allItemIds.forEach((id) => next.add(id));
+          return next;
+        });
+      }
+    };
+
+    return (
+      <Card key={artistId} className="overflow-hidden">
+        <div
+          className="flex items-center justify-between gap-2 p-3 bg-muted/30 cursor-pointer hover:bg-muted/50 transition-colors"
+          onClick={() => toggleExpanded(artistId)}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <div onClick={(e) => e.stopPropagation()}>
+              <Checkbox
+                checked={artistAllSelected}
+                data-state={artistSomeSelected && !artistAllSelected ? 'indeterminate' : undefined}
+                onCheckedChange={toggleArtistSelect}
+                aria-label={`选择 ${artistName} 的所有档期`}
+              />
+            </div>
+            {isExpanded ? (
+              <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
+            ) : (
+              <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+            )}
+            <span className="font-semibold text-sm truncate">{artistName}</span>
+            <span className="text-xs text-muted-foreground shrink-0">({items.length} 条档期)</span>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-9 text-primary"
+              onClick={(e) => {
+                e.stopPropagation();
+                openBatchEdit(artistId);
+              }}
+              title="批量编辑该歌手档期"
+            >
+              <Pencil className="h-4 w-4 mr-1" />
+              编辑
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-9 w-9 text-destructive"
+              onClick={(e) => {
+                e.stopPropagation();
+                handleDeleteArtistAvailabilities(artistId);
+              }}
+              title="删除该歌手所有档期"
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+
+        {isExpanded && (
+          <div className="divide-y">
+            {items.map((a) => (
+              <div
+                key={a.id}
+                className="flex items-center justify-between gap-3 p-3 hover:bg-muted/20 transition-colors"
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <Checkbox
+                    checked={selectedIds.has(a.id)}
+                    onCheckedChange={() => toggleSelect(a.id)}
+                    aria-label={`选择档期`}
+                  />
+                  <div className="min-w-0">
+                    <div className="text-xs text-muted-foreground">
+                      {a.day_of_week !== null && a.day_of_week !== undefined
+                        ? weekDays[a.day_of_week]
+                        : a.specific_date || '-'} · {a.available_start}~{a.available_end}
+                      · {a.is_available ? '可排' : '不可排'}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Select
+                    value={a.availability_type}
+                    onValueChange={(v: any) => toggleAvailabilityType(a.id, v)}
+                  >
+                    <SelectTrigger className="h-8 w-22 px-2 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="temporary">临时</SelectItem>
+                      <SelectItem value="fixed">固定</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-9 w-9"
+                    onClick={() => openEditDialog(a)}
+                    title="编辑"
+                  >
+                    <Pencil className="h-4 w-4" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-9 w-9 text-destructive"
+                    onClick={() => handleDeleteSingle(a.id)}
+                    title="删除"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {/* 酒吧排班优先级（展开时显示） */}
+        {isExpanded && (barPriorities[artistId] || []).length > 1 && (
+          <div className="border-t p-3 space-y-1.5">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">排班优先级</span>
+              <span className="text-[10px] text-muted-foreground/50">越靠上优先越高</span>
+            </div>
+            {(barPriorities[artistId] || []).map((bid, idx) => {
+              const bar = bars.find((b) => b.id === bid);
+              if (!bar) return null;
+              return (
+                <div key={bid} className="flex items-center gap-2 py-1">
+                  <div className="flex flex-col shrink-0">
+                    <button
+                      type="button"
+                      disabled={idx === 0}
+                      onClick={() => moveBarPriority(artistId, idx, idx - 1)}
+                      className={`p-0.5 rounded ${idx === 0 ? 'text-muted-foreground/20' : 'text-muted-foreground hover:text-foreground'}`}
+                    >
+                      <ChevronUp className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={idx === (barPriorities[artistId] || []).length - 1}
+                      onClick={() => moveBarPriority(artistId, idx, idx + 1)}
+                      className={`p-0.5 rounded ${idx === (barPriorities[artistId] || []).length - 1 ? 'text-muted-foreground/20' : 'text-muted-foreground hover:text-foreground'}`}
+                    >
+                      <ChevronDown className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${
+                    idx === 0 ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground'
+                  }`}>
+                    {idx + 1}
+                  </span>
+                  <span className="text-xs">{bar.name}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Card>
+    );
+  }
 
   return (
     <div className="space-y-4 pb-6">
@@ -609,26 +892,59 @@ export default function ArtistAvailabilityPage() {
         </div>
       </div>
 
+      {/* Tag filter bar */}
+      <div className="px-4 -mb-1">
+        <div className="flex gap-1.5 overflow-x-auto pb-1 scrollbar-none">
+          <button
+            onClick={() => setSelectedTag('all')}
+            className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-medium transition-colors whitespace-nowrap ${
+              selectedTag === 'all'
+                ? 'bg-primary text-primary-foreground'
+                : 'bg-muted text-muted-foreground hover:bg-muted/80'
+            }`}
+          >
+            全部
+          </button>
+          {tagStats.entries.map(([tag, count]) => (
+            <button
+              key={tag}
+              onClick={() => setSelectedTag(tag)}
+              className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-medium transition-colors whitespace-nowrap ${
+                selectedTag === tag
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-muted text-muted-foreground hover:bg-muted/80'
+              }`}
+            >
+              {tag}{count}
+            </button>
+          ))}
+          {tagStats.untagged > 0 && (
+            <button
+              onClick={() => setSelectedTag('未分类')}
+              className={`shrink-0 px-3 py-1.5 rounded-full text-xs font-medium transition-colors whitespace-nowrap ${
+                selectedTag === '未分类'
+                  ? 'bg-primary text-primary-foreground'
+                  : 'bg-muted text-muted-foreground hover:bg-muted/80'
+              }`}
+            >
+              未分类{tagStats.untagged}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Search */}
       <div className="flex flex-col gap-3 px-4">
         <div className="relative">
           <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
           <Input placeholder="搜索歌手姓名" value={search} onChange={(e) => setSearch(e.target.value)} className="pl-10 h-11" />
         </div>
-        <Select value={selectedArtistId} onValueChange={setSelectedArtistId}>
-          <SelectTrigger className="h-11"><SelectValue placeholder="全部歌手" /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">全部歌手</SelectItem>
-            {artists.filter((a) => a.type === 'singer').map((a) => (
-              <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
       </div>
 
       {filteredAvail.length === 0 ? (
         <Card><CardContent className="p-8 text-center text-muted-foreground">暂无档期配置</CardContent></Card>
       ) : (
-        <div className="space-y-3 px-4">
+        <div className="space-y-4 px-4">
           {/* Batch toolbar */}
           <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2">
@@ -650,151 +966,27 @@ export default function ArtistAvailabilityPage() {
             )}
           </div>
 
-          {/* Grouped by artist */}
-          {Array.from(
-            filteredAvail.reduce((map, a) => {
-              if (!map.has(a.artist_id)) map.set(a.artist_id, []);
-              map.get(a.artist_id)!.push(a);
-              return map;
-            }, new Map<string, ArtistAvailability[]>())
-          ).map(([artistId, items]) => {
-            const artistName = getArtistName(artistId);
-            const isExpanded = expandedArtists.has(artistId);
-            const allItemIds = items.map((i) => i.id);
-            const artistAllSelected = allItemIds.every((id) => selectedIds.has(id));
-            const artistSomeSelected = allItemIds.some((id) => selectedIds.has(id));
-
-            const toggleArtistSelect = () => {
-              if (artistAllSelected) {
-                setSelectedIds((prev) => {
-                  const next = new Set(prev);
-                  allItemIds.forEach((id) => next.delete(id));
-                  return next;
-                });
-              } else {
-                setSelectedIds((prev) => {
-                  const next = new Set(prev);
-                  allItemIds.forEach((id) => next.add(id));
-                  return next;
-                });
-              }
-            };
-
-            return (
-              <Card key={artistId} className="overflow-hidden">
-                {/* Artist header */}
-                <div
-                  className="flex items-center justify-between gap-2 p-3 bg-muted/30 cursor-pointer hover:bg-muted/50 transition-colors"
-                  onClick={() => toggleExpanded(artistId)}
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <div onClick={(e) => e.stopPropagation()}>
-                      <Checkbox
-                        checked={artistAllSelected}
-                        data-state={artistSomeSelected && !artistAllSelected ? 'indeterminate' : undefined}
-                        onCheckedChange={toggleArtistSelect}
-                        aria-label={`选择 ${artistName} 的所有档期`}
-                      />
-                    </div>
-                    {isExpanded ? (
-                      <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
-                    ) : (
-                      <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
-                    )}
-                    <span className="font-semibold text-sm truncate">{artistName}</span>
-                    <span className="text-xs text-muted-foreground shrink-0">({items.length} 条档期)</span>
-                  </div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-9 text-primary"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openBatchEdit(artistId);
-                      }}
-                      title="批量编辑该歌手档期"
-                    >
-                      <Pencil className="h-4 w-4 mr-1" />
-                      编辑
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-9 w-9 text-destructive"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDeleteArtistAvailabilities(artistId);
-                      }}
-                      title="删除该歌手所有档期"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </div>
+          {/* 「全部」模式：按标签分区 */}
+          {selectedTag === 'all' && sections ? (
+            sections.map((section) => (
+              <div key={section.tag} className="space-y-2">
+                <div className="flex items-center gap-2 pt-1">
+                  <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                    {section.tag}
+                  </span>
+                  <span className="text-xs text-muted-foreground/60">· {section.groups.length}人</span>
                 </div>
-
-                {/* Availability items */}
-                {isExpanded && (
-                  <div className="divide-y">
-                    {items.map((a) => (
-                      <div
-                        key={a.id}
-                        className="flex items-center justify-between gap-3 p-3 hover:bg-muted/20 transition-colors"
-                      >
-                        <div className="flex items-center gap-3 min-w-0">
-                          <Checkbox
-                            checked={selectedIds.has(a.id)}
-                            onCheckedChange={() => toggleSelect(a.id)}
-                            aria-label={`选择档期`}
-                          />
-                          <div className="min-w-0">
-                            <div className="text-xs text-muted-foreground">
-                              {a.day_of_week !== null && a.day_of_week !== undefined
-                                ? weekDays[a.day_of_week]
-                                : a.specific_date || '-'} · {a.available_start}~{a.available_end}
-                              · {a.is_available ? '可排' : '不可排'}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <Select
-                            value={a.availability_type}
-                            onValueChange={(v: any) => toggleAvailabilityType(a.id, v)}
-                          >
-                            <SelectTrigger className="h-8 w-22 px-2 text-xs">
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="temporary">临时</SelectItem>
-                              <SelectItem value="fixed">固定</SelectItem>
-                            </SelectContent>
-                          </Select>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-9 w-9"
-                            onClick={() => openEditDialog(a)}
-                            title="编辑"
-                          >
-                            <Pencil className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-9 w-9 text-destructive"
-                            onClick={() => handleDeleteSingle(a.id)}
-                            title="删除"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </Card>
-            );
-          })}
+                <div className="space-y-2">
+                  {section.groups.map((g) => renderArtistGroup(g.artistId, g.artistName, g.items))}
+                </div>
+              </div>
+            ))
+          ) : groupedAvail ? (
+            /* 单标签模式：按歌手分组 */
+            <div className="space-y-2">
+              {groupedAvail.map((g) => renderArtistGroup(g.artistId, g.artistName, g.items))}
+            </div>
+          ) : null}
         </div>
       )}
 
@@ -805,7 +997,6 @@ export default function ArtistAvailabilityPage() {
             <SheetTitle className="text-left">批量编辑档期（共 {selectedIds.size} 条）</SheetTitle>
           </SheetHeader>
           <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
-            {/* 星期复选框（核心：新增/删除档期） */}
             <div className="space-y-3 border rounded-lg p-3 bg-muted/20">
               <div className="flex items-center justify-between">
                 <Label className="text-sm font-medium">星期覆盖（勾选即创建，取消即删除）</Label>
@@ -829,7 +1020,6 @@ export default function ArtistAvailabilityPage() {
               </div>
             </div>
 
-            {/* 其他字段（可选修改） */}
             <div className="space-y-1 text-xs text-muted-foreground">以下字段勾选后应用到所有保留的档期：</div>
             {[
               { key: 'artist', label: '歌手', render: (
@@ -934,7 +1124,6 @@ export default function ArtistAvailabilityPage() {
                 </SelectContent>
               </Select>
             </div>
-            {/* 固定档期：只显示星期 */}
             {availForm.availability_type === 'fixed' && (
               <div className="space-y-2">
                 <Label>星期</Label>
@@ -946,7 +1135,6 @@ export default function ArtistAvailabilityPage() {
                 </Select>
               </div>
             )}
-            {/* 临时档期：同时支持具体日期和星期（可切换） */}
             {availForm.availability_type === 'temporary' && (
               <div className="space-y-3">
                 <div className="space-y-2">
