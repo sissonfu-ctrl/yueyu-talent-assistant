@@ -92,5 +92,8 @@
     "typescript": "~5.9.3",
     "vite": "npm:rolldown-vite@latest",
     "vite-plugin-svgr": "^4.5.0"
+  },
+  "engines": {
+    "node": "20.x"
   }
 }
